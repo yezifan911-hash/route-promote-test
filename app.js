@@ -239,7 +239,9 @@ function mergeData(monitoringRows, detailRows) {
   });
 
   return {
-    merged,
+    // Only successfully joined packages enter KPI, driver and route analysis.
+    // Unmatched monitoring rows remain visible through the quality counters.
+    merged: merged.filter(row => row.matched),
     quality: {
       monitoringRows: monitoringRows.length,
       detailRows: detailRows.length,
