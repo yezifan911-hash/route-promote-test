@@ -484,6 +484,9 @@ function initializeMap() {
   const capitalRegionBounds = L.latLngBounds([42.45, -74.35], [43.05, -73.35]);
   state.map = L.map("map", {
     zoomControl: true,
+    scrollWheelZoom: false,
+    keyboard: false,
+    doubleClickZoom: false,
     minZoom: 8,
     maxBounds: capitalRegionBounds.pad(.15),
     maxBoundsViscosity: .85,
@@ -539,7 +542,8 @@ async function lookupZip(zip) {
   return result;
 }
 
-async function locateRoutes() {
+async function locateRoutes(event) {
+  event?.preventDefault();
   initializeMap();
   if (!state.map || !state.markerLayer) return;
   state.markerLayer.clearLayers();
@@ -576,7 +580,7 @@ async function locateRoutes() {
         fillOpacity: .48,
         weight: 2
       }).bindTooltip(`${escapeHtml(route.zip)} · ${formatInt(route.packages)}件`, {direction: "top"})
-        .bindPopup(`<strong>${escapeHtml(areaLabel)} · ${escapeHtml(route.zip)}</strong><br>${escapeHtml(cityLabel)}<br>${formatInt(route.packages)} 件 · ${formatWeight(route.totalWeight)}<br>妥投率 ${formatPct(route.delivered, route.packages)}<br>准时率 ${formatPct(route.onTime, route.eligible)}`);
+        .bindPopup(`<strong>${escapeHtml(areaLabel)} · ${escapeHtml(route.zip)}</strong><br>${escapeHtml(cityLabel)}<br>${formatInt(route.packages)} 件 · ${formatWeight(route.totalWeight)}<br>妥投率 ${formatPct(route.delivered, route.packages)}<br>准时率 ${formatPct(route.onTime, route.eligible)}`, {autoPan: false});
       marker.addTo(state.markerLayer);
       bounds.push([point.lat, point.lng]);
       located += 1;
@@ -584,8 +588,7 @@ async function locateRoutes() {
       console.warn(error.message);
     }
   }
-  if (bounds.length === 1) state.map.setView(bounds[0], 10, {animate: false});
-  else if (bounds.length > 1) state.map.fitBounds(bounds, {padding: [55, 55], maxZoom: 10, animate: false});
+  // Keep the current Albany view stable after markers load; users can pan manually.
   $("mapStatus").textContent = outsideRegion
     ? `已定位 ${located}/${routes.length} 个ZIP，忽略 ${outsideRegion} 个范围外ZIP`
     : `已定位 ${located}/${routes.length} 个ZIP`;
@@ -647,7 +650,7 @@ function runAnalysis(monitoringRows, detailRows) {
   renderAreaSelect();
   $("results").classList.remove("hidden");
   initializeMap();
-  setTimeout(() => state.map?.invalidateSize(), 0);
+  setTimeout(() => state.map?.invalidateSize({pan: false, animate: false}), 0);
 }
 
 async function handleAnalyze() {
