@@ -8,7 +8,7 @@ const MONITORING_KEEP = [
 
 const DETAIL_KEEP = [
   "运单号", "客户单号", "派送方", "收件州/省", "收件城市", "收件区", "收件地邮编", "预报重量(kg)",
-  "结算重量(kg)", "运单状态", "操作人", "产品类型", "预报体积",
+  "结算重量(kg)", "运单状态", "操作人", "产品类型", "收件地详细地址", "预报体积",
   "预报体积重", "复核重量", "复核体积", "复核体积重", "快递员工作区域名称", "目的中心",
   "目的站点", "下单时间", "是否退件", "派送失败天数", "编辑时间", "首次中心签入时间", "最新操作时间"
 ];
@@ -39,7 +39,8 @@ const state = {
   routes: [],
   quality: {},
   map: null,
-  markerLayer: null
+  markerLayer: null,
+  canvasRenderer: null
 };
 
 const $ = id => document.getElementById(id);
@@ -62,6 +63,14 @@ function normalizeTracking(value) {
 function normalizeZip(value) {
   const match = String(value ?? "").match(/\b(\d{5})\b/);
   return match ? match[1] : "";
+}
+
+function normalizeStreet(value) {
+  return String(value ?? "")
+    .replace(/\*/g, " ")
+    .replace(/\b(?:apt|apartment|unit|suite|ste|floor|fl)\b.*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function asNumber(value) {
@@ -240,6 +249,7 @@ function mergeData(monitoringRows, detailRows) {
       zip,
       city: String(detail["收件城市"] || "").trim(),
       state: String(detail["收件州/省"] || "").trim(),
+      streetGroup: normalizeStreet(detail["收件地详细地址"]),
       task: String(source["任务编码"] || "").trim(),
       station: String(pick(source, ["签入站点"]) || pick(detail, ["派送方", "目的站点"])).trim(),
       pickupAt,
@@ -502,6 +512,7 @@ function initializeMap() {
     $("mapStatus").textContent = "部分底图未加载；ZIP点仍可正常查看";
   });
   state.markerLayer = L.layerGroup().addTo(state.map);
+  state.canvasRenderer = L.canvas({padding: .5});
 }
 
 function combineMapRoutes(routes) {
@@ -533,6 +544,65 @@ function combineMapRoutes(routes) {
   return [...groups.values()];
 }
 
+
+function hashValue(value) {
+  let hash = 2166136261;
+  for (const char of String(value)) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function approximateStopPoint(center, key) {
+  const angle = hashValue(key) / 4294967295 * Math.PI * 2;
+  const distanceSeed = hashValue(`${key}|distance`) / 4294967295;
+  const spread = String(key).startsWith("122") ? .016 : .032;
+  const distance = Math.sqrt(distanceSeed) * spread;
+  const latitude = center.lat + Math.sin(angle) * distance;
+  const longitudeScale = Math.max(.2, Math.cos(center.lat * Math.PI / 180));
+  const longitude = center.lng + Math.cos(angle) * distance / longitudeScale;
+  return {lat: latitude, lng: longitude};
+}
+
+function combineApproxStops(rows) {
+  const groups = new Map();
+  rows.forEach(row => {
+    if (!/^\d{5}$/.test(row.zip)) return;
+    const street = row.streetGroup || "街道信息缺失";
+    const key = `${row.zip}|||${street}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        zip: row.zip,
+        street,
+        city: row.city || "—",
+        areas: new Set(),
+        packages: 0,
+        delivered: 0,
+        eligible: 0,
+        onTime: 0,
+        exceptions: 0,
+        returns: 0
+      });
+    }
+    const group = groups.get(key);
+    group.packages += 1;
+    group.delivered += Number(row.delivered);
+    group.eligible += Number(row.onTimeEligible);
+    group.onTime += Number(row.onTime);
+    group.exceptions += Number(row.exception);
+    group.returns += Number(row.returned);
+    if (row.area) group.areas.add(row.area);
+  });
+  return [...groups.values()];
+}
+
+function performanceColor(delivered, packages) {
+  const rate = packages ? delivered / packages : 0;
+  return rate >= .99 ? "#0d6b4f" : rate >= .97 ? "#b87018" : "#b33a31";
+}
+
 async function lookupZip(zip) {
   const cacheKey = `ben-route-zip-${zip}`;
   const cached = localStorage.getItem(cacheKey);
@@ -553,6 +623,8 @@ async function locateRoutes(event) {
   if (!state.map || !state.markerLayer) return;
   state.markerLayer.clearLayers();
   const routes = combineMapRoutes(state.routes);
+  const mode = $("mapMode").value;
+  const zipPoints = new Map();
   if (!routes.length) {
     $("mapStatus").textContent = "没有可定位的5位ZIP";
     return;
@@ -571,32 +643,63 @@ async function locateRoutes(event) {
         outsideRegion += 1;
         continue;
       }
-      const deliveredRate = route.packages ? route.delivered / route.packages : 0;
-      const onTimeRate = route.eligible ? route.onTime / route.eligible : null;
-      const effectiveRate = onTimeRate ?? deliveredRate;
-      const color = effectiveRate >= .99 ? "#0d6b4f" : effectiveRate >= .97 ? "#b87018" : "#b33a31";
-      const radius = 7 + Math.sqrt(route.packages / maxPackages) * 12;
-      const cityLabel = [...route.cities].join("、") || point.place || "—";
-      const areaLabel = [...route.areas].join("、") || "未识别区域";
-      const marker = L.circleMarker([point.lat, point.lng], {
-        radius,
-        color,
-        fillColor: color,
-        fillOpacity: .48,
-        weight: 2
-      }).bindTooltip(`${escapeHtml(route.zip)} · ${formatInt(route.packages)}件`, {direction: "top"})
-        .bindPopup(`<strong>${escapeHtml(areaLabel)} · ${escapeHtml(route.zip)}</strong><br>${escapeHtml(cityLabel)}<br>${formatInt(route.packages)} 件 · ${formatWeight(route.totalWeight)}<br>妥投率 ${formatPct(route.delivered, route.packages)}<br>准时率 ${formatPct(route.onTime, route.eligible)}`, {autoPan: false});
-      marker.addTo(state.markerLayer);
+      zipPoints.set(route.zip, point);
+      if (mode === "zip") {
+        const deliveredRate = route.packages ? route.delivered / route.packages : 0;
+        const onTimeRate = route.eligible ? route.onTime / route.eligible : null;
+        const effectiveRate = onTimeRate ?? deliveredRate;
+        const color = effectiveRate >= .99 ? "#0d6b4f" : effectiveRate >= .97 ? "#b87018" : "#b33a31";
+        const radius = 7 + Math.sqrt(route.packages / maxPackages) * 12;
+        const cityLabel = [...route.cities].join("、") || point.place || "—";
+        const areaLabel = [...route.areas].join("、") || "未识别区域";
+        const marker = L.circleMarker([point.lat, point.lng], {
+          radius,
+          color,
+          fillColor: color,
+          fillOpacity: .48,
+          weight: 2
+        }).bindTooltip(`${escapeHtml(route.zip)} · ${formatInt(route.packages)}件`, {direction: "top"})
+          .bindPopup(`<strong>${escapeHtml(areaLabel)} · ${escapeHtml(route.zip)}</strong><br>${escapeHtml(cityLabel)}<br>${formatInt(route.packages)} 件 · ${formatWeight(route.totalWeight)}<br>妥投率 ${formatPct(route.delivered, route.packages)}<br>准时率 ${formatPct(route.onTime, route.eligible)}`, {autoPan: false});
+        marker.addTo(state.markerLayer);
+      }
       bounds.push([point.lat, point.lng]);
       located += 1;
     } catch (error) {
       console.warn(error.message);
     }
   }
-  // Keep the current Albany view stable after markers load; users can pan manually.
-  $("mapStatus").textContent = outsideRegion
-    ? `已定位 ${located}/${routes.length} 个ZIP，忽略 ${outsideRegion} 个范围外ZIP`
-    : `已定位 ${located}/${routes.length} 个ZIP`;
+  let plottedStops = 0;
+  if (mode === "stops") {
+    const stops = combineApproxStops(state.mergedRows);
+    stops.forEach(stop => {
+      const center = zipPoints.get(stop.zip);
+      if (!center) return;
+      const point = approximateStopPoint(center, stop.key);
+      const color = performanceColor(stop.delivered, stop.packages);
+      const radius = Math.min(14, 3 + Math.sqrt(stop.packages) * 1.5);
+      const areaLabel = [...stop.areas].join("、") || "未识别区域";
+      L.circleMarker([point.lat, point.lng], {
+        renderer: state.canvasRenderer,
+        radius,
+        stroke: true,
+        weight: 1,
+        color,
+        fillColor: color,
+        fillOpacity: .5
+      }).bindTooltip(`${escapeHtml(stop.street)} · ${formatInt(stop.packages)}件`, {direction: "top"})
+        .bindPopup(`<strong>大致Stop · ${escapeHtml(stop.zip)}</strong><br>${escapeHtml(stop.street)}<br>${escapeHtml(stop.city)} · ${escapeHtml(areaLabel)}<br>${formatInt(stop.packages)} 件<br>妥投率 ${formatPct(stop.delivered, stop.packages)}<br>异常 ${formatInt(stop.exceptions)} 件`, {autoPan: false})
+        .addTo(state.markerLayer);
+      plottedStops += 1;
+    });
+  }
+    // Keep the current Albany view stable after markers load; users can pan manually.
+  if (mode === "stops") {
+    $("mapStatus").textContent = `已生成 ${formatInt(plottedStops)} 个街道级大致Stop（非真实门牌）`;
+  } else {
+    $("mapStatus").textContent = outsideRegion
+      ? `已定位 ${located}/${routes.length} 个ZIP，忽略 ${outsideRegion} 个范围外ZIP`
+      : `已定位 ${located}/${routes.length} 个ZIP`;
+  }
   $("locateBtn").disabled = false;
 }
 
@@ -726,5 +829,5 @@ $("exportBtn").addEventListener("click", exportCsv);
 updateAnalyzeButton();
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = {cleanRows, parseDate, parseDueTime, normalizeTracking, normalizeZip, repairSheetRange, mergeData, combineMapRoutes};
+  module.exports = {cleanRows, parseDate, parseDueTime, normalizeTracking, normalizeZip, repairSheetRange, mergeData, combineMapRoutes, combineApproxStops, approximateStopPoint};
 }
