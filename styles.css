@@ -200,3 +200,14 @@ footer { max-width: 1320px; margin: 0 auto; padding: 0 28px 32px; color: var(--m
 .legend-dot.good { background: #0d6b4f; }
 .legend-dot.warn { background: #b87018; }
 .legend-dot.bad { background: #b33a31; }
+
+.model-note {
+  margin: -6px 0 14px;
+  padding: 11px 13px;
+  border-left: 3px solid var(--green);
+  border-radius: 0 9px 9px 0;
+  background: #f3faf7;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
