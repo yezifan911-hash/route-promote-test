@@ -481,12 +481,48 @@ function recommendDrivers() {
 
 function initializeMap() {
   if (state.map || !window.L) return;
-  state.map = L.map("map", {zoomControl: true}).setView([42.72, -73.83], 9);
+  const capitalRegionBounds = L.latLngBounds([42.45, -74.35], [43.05, -73.35]);
+  state.map = L.map("map", {
+    zoomControl: true,
+    minZoom: 8,
+    maxBounds: capitalRegionBounds.pad(.15),
+    maxBoundsViscosity: .85,
+    worldCopyJump: false
+  }).setView([42.72, -73.88], 9);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 18,
     attribution: "&copy; OpenStreetMap contributors"
   }).addTo(state.map);
   state.markerLayer = L.layerGroup().addTo(state.map);
+}
+
+function combineMapRoutes(routes) {
+  const groups = new Map();
+  routes.filter(route => /^\d{5}$/.test(route.zip)).forEach(route => {
+    if (!groups.has(route.zip)) {
+      groups.set(route.zip, {
+        zip: route.zip,
+        packages: 0,
+        drivers: 0,
+        delivered: 0,
+        eligible: 0,
+        onTime: 0,
+        totalWeight: 0,
+        areas: new Set(),
+        cities: new Set()
+      });
+    }
+    const group = groups.get(route.zip);
+    group.packages += route.packages;
+    group.drivers += route.drivers;
+    group.delivered += route.delivered;
+    group.eligible += route.eligible;
+    group.onTime += route.onTime;
+    group.totalWeight += route.totalWeight;
+    if (route.area) group.areas.add(route.area);
+    if (route.city && route.city !== "—") group.cities.add(route.city);
+  });
+  return [...groups.values()];
 }
 
 async function lookupZip(zip) {
@@ -507,7 +543,7 @@ async function locateRoutes() {
   initializeMap();
   if (!state.map || !state.markerLayer) return;
   state.markerLayer.clearLayers();
-  const routes = state.routes.filter(route => /^\d{5}$/.test(route.zip));
+  const routes = combineMapRoutes(state.routes);
   if (!routes.length) {
     $("mapStatus").textContent = "没有可定位的5位ZIP";
     return;
@@ -515,19 +551,32 @@ async function locateRoutes() {
   $("locateBtn").disabled = true;
   const bounds = [];
   let located = 0;
+  let outsideRegion = 0;
+  const maxPackages = Math.max(...routes.map(route => route.packages), 1);
   for (let i = 0; i < routes.length; i += 1) {
     const route = routes[i];
     $("mapStatus").textContent = `正在定位 ${i + 1}/${routes.length}`;
     try {
       const point = await lookupZip(route.zip);
-      const color = route.risk === "高" ? "#b33a31" : route.risk === "中" ? "#b87018" : "#0d6b4f";
+      if (point.lat < 42.45 || point.lat > 43.05 || point.lng < -74.35 || point.lng > -73.35) {
+        outsideRegion += 1;
+        continue;
+      }
+      const deliveredRate = route.packages ? route.delivered / route.packages : 0;
+      const onTimeRate = route.eligible ? route.onTime / route.eligible : null;
+      const effectiveRate = onTimeRate ?? deliveredRate;
+      const color = effectiveRate >= .99 ? "#0d6b4f" : effectiveRate >= .97 ? "#b87018" : "#b33a31";
+      const radius = 7 + Math.sqrt(route.packages / maxPackages) * 12;
+      const cityLabel = [...route.cities].join("、") || point.place || "—";
+      const areaLabel = [...route.areas].join("、") || "未识别区域";
       const marker = L.circleMarker([point.lat, point.lng], {
-        radius: Math.min(24, 7 + Math.sqrt(route.packages) * 1.4),
+        radius,
         color,
         fillColor: color,
-        fillOpacity: .55,
+        fillOpacity: .48,
         weight: 2
-      }).bindPopup(`<strong>${escapeHtml(route.area)} · ${escapeHtml(route.zip)}</strong><br>${escapeHtml(route.city === "—" ? point.place : route.city)}<br>${formatInt(route.packages)} 件 · ${formatWeight(route.totalWeight)}<br>妥投率 ${formatPct(route.delivered, route.packages)}<br>准时率 ${formatPct(route.onTime, route.eligible)}`);
+      }).bindTooltip(`${escapeHtml(route.zip)} · ${formatInt(route.packages)}件`, {direction: "top"})
+        .bindPopup(`<strong>${escapeHtml(areaLabel)} · ${escapeHtml(route.zip)}</strong><br>${escapeHtml(cityLabel)}<br>${formatInt(route.packages)} 件 · ${formatWeight(route.totalWeight)}<br>妥投率 ${formatPct(route.delivered, route.packages)}<br>准时率 ${formatPct(route.onTime, route.eligible)}`);
       marker.addTo(state.markerLayer);
       bounds.push([point.lat, point.lng]);
       located += 1;
@@ -535,8 +584,11 @@ async function locateRoutes() {
       console.warn(error.message);
     }
   }
-  if (bounds.length) state.map.fitBounds(bounds, {padding: [35, 35], maxZoom: 11});
-  $("mapStatus").textContent = `已定位 ${located}/${routes.length} 个ZIP`;
+  if (bounds.length === 1) state.map.setView(bounds[0], 10, {animate: false});
+  else if (bounds.length > 1) state.map.fitBounds(bounds, {padding: [55, 55], maxZoom: 10, animate: false});
+  $("mapStatus").textContent = outsideRegion
+    ? `已定位 ${located}/${routes.length} 个ZIP，忽略 ${outsideRegion} 个范围外ZIP`
+    : `已定位 ${located}/${routes.length} 个ZIP`;
   $("locateBtn").disabled = false;
 }
 
@@ -666,5 +718,5 @@ $("exportBtn").addEventListener("click", exportCsv);
 updateAnalyzeButton();
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = {cleanRows, parseDate, parseDueTime, normalizeTracking, normalizeZip, repairSheetRange, mergeData};
+  module.exports = {cleanRows, parseDate, parseDueTime, normalizeTracking, normalizeZip, repairSheetRange, mergeData, combineMapRoutes};
 }
