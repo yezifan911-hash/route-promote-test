@@ -1,4 +1,4 @@
-name: Deploy private-repo site to GitHub Pages
+name: Deploy route performance site to GitHub Pages
 
 on:
   push:
