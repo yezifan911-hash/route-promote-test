@@ -1,3 +1,4 @@
+# Redeploy trigger: 2026-09-30
 name: Deploy route performance site to GitHub Pages
 
 on:
