@@ -155,7 +155,37 @@ async function readSpreadsheet(file) {
   const workbook = XLSX.read(buffer, {type: "array", cellDates: true});
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) throw new Error(`${file.name} 中未找到工作表。`);
-  return cleanRows(XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {defval: "", raw: true}));
+  const sheet = workbook.Sheets[sheetName];
+  repairSheetRange(sheet);
+  return cleanRows(XLSX.utils.sheet_to_json(sheet, {defval: "", raw: true}));
+}
+
+function repairSheetRange(sheet) {
+  if (!window.XLSX || !sheet) return "";
+  let minRow = Infinity;
+  let minColumn = Infinity;
+  let maxRow = -1;
+  let maxColumn = -1;
+
+  // Some GOFO exports declare a range ending at row 2 even though thousands
+  // of cell records exist in the worksheet XML. SheetJS keeps those cells,
+  // so rebuild !ref from the actual cell addresses before sheet_to_json.
+  Object.keys(sheet).forEach(address => {
+    if (!/^[A-Z]+\d+$/.test(address)) return;
+    const cell = XLSX.utils.decode_cell(address);
+    minRow = Math.min(minRow, cell.r);
+    minColumn = Math.min(minColumn, cell.c);
+    maxRow = Math.max(maxRow, cell.r);
+    maxColumn = Math.max(maxColumn, cell.c);
+  });
+
+  if (maxRow < 0 || maxColumn < 0) return sheet["!ref"] || "";
+  const actualRange = XLSX.utils.encode_range({
+    s: {r: minRow, c: minColumn},
+    e: {r: maxRow, c: maxColumn}
+  });
+  sheet["!ref"] = actualRange;
+  return actualRange;
 }
 
 function latestDetailRows(rows) {
@@ -636,5 +666,5 @@ $("exportBtn").addEventListener("click", exportCsv);
 updateAnalyzeButton();
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = {parseDate, parseDueTime, normalizeTracking, normalizeZip, mergeData};
+  module.exports = {cleanRows, parseDate, parseDueTime, normalizeTracking, normalizeZip, repairSheetRange, mergeData};
 }
