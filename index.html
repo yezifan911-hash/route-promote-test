@@ -48,15 +48,15 @@
       </div>
 
       <div class="action-row">
-        <button id="analyzeBtn" class="primary" disabled>连接并分析</button>
-        <button id="sampleBtn" class="secondary">加载脱敏示例</button>
-        <button id="resetBtn" class="ghost">重置</button>
+        <button type="button" id="analyzeBtn" class="primary" disabled>连接并分析</button>
+        <button type="button" id="sampleBtn" class="secondary">加载脱敏示例</button>
+        <button type="button" id="resetBtn" class="ghost">重置</button>
         <span id="statusText" class="status" role="status">等待数据</span>
       </div>
 
       <details class="privacy-details">
         <summary>数据如何处理</summary>
-        <p>Excel仅在当前浏览器内读取。分析仅保留业务所需字段，姓名以外的收件人信息、手机号、邮箱、客户单号等字段不会进入分析结果。ZIP地图查询只发送5位ZIP，不发送街道、运单号或司机信息。</p>
+        <p>Excel仅在当前浏览器内读取。分析仅保留业务所需字段，手机号、邮箱、收件人姓名、详细地址和申报货值等字段不会进入分析结果。ZIP地图查询只发送5位ZIP，不发送街道、运单号或司机信息。</p>
       </details>
     </section>
 
@@ -91,7 +91,7 @@
             <h2 id="map-title">ZIP货量地图</h2>
           </div>
           <div class="map-actions">
-            <button id="locateBtn" class="secondary">定位ZIP</button>
+            <button type="button" id="locateBtn" class="secondary">定位ZIP</button>
             <span id="mapStatus" class="section-note">ZIP中心点；圆圈按相对件量缩放</span>
           </div>
         </div>
@@ -125,7 +125,7 @@
               <input id="plannedPackages" type="number" min="1" step="1" value="100">
             </label>
           </div>
-          <button id="recommendBtn" class="primary full">生成推荐</button>
+          <button type="button" id="recommendBtn" class="primary full">生成推荐</button>
           <div id="recommendation" class="recommendation empty-state">选择区域和计划件量后生成推荐。</div>
         </section>
       </section>
@@ -136,7 +136,7 @@
             <p class="step">05 · 司机表现</p>
             <h2 id="driver-title">司机—区域表现</h2>
           </div>
-          <button id="exportBtn" class="secondary">导出清洗结果 CSV</button>
+          <button type="button" id="exportBtn" class="secondary">导出清洗结果 CSV</button>
         </div>
         <div class="table-wrap">
           <table>
