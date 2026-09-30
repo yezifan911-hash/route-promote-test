@@ -38,6 +38,8 @@ const state = {
   drivers: [],
   routes: [],
   quality: {},
+  calibration: {alpha: .1, calibrated: false, predictions: 0, mse: null},
+  driverDays: [],
   map: null,
   markerLayer: null,
   canvasRenderer: null
@@ -311,28 +313,123 @@ function percentile(values, p) {
   return sorted[lower] + (sorted[upper] - sorted[lower]) * (index - lower);
 }
 
-function summarizeDrivers(rows) {
-  const fleetEligible = rows.filter(row => row.onTimeEligible);
-  const fleetOnTimeRate = fleetEligible.length ? fleetEligible.filter(row => row.onTime).length / fleetEligible.length : null;
-  const fleetDeliveredRate = rows.length ? rows.filter(row => row.delivered).length / rows.length : 0;
+function controllableIssueWeight(row) {
+  if (!row.exception) return 0;
+  const text = [row.problemType, row.courierStatus, row.latestStatus, row.detailStatus].filter(Boolean).join("|").toLowerCase();
+  // Interim operational categories. They remain visible as an uncalibrated signal
+  // until the operation supplies controllability and cost labels.
+  if (/天气|暴雪|洪水|客户拒收|收件人不在|门禁|无法进入|地址不详|自然灾害|weather/.test(text)) return 0;
+  if (/虚假签收|丢失|错投|fraud|lost|misdeliver/.test(text)) return 3;
+  if (/pod|照片|签收证明|proof/.test(text)) return 2;
+  return 1;
+}
+
+function buildDriverDayRoutes(rows) {
+  const groups = new Map();
+  rows.forEach(row => {
+    const day = dateKey(row.routeDate);
+    const key = `${row.driver}|||${row.area}|||${day}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        driver: row.driver,
+        route: row.area,
+        date: day,
+        rows: [],
+        volume: 0,
+        delivered: 0,
+        exceptions: 0,
+        issueWeight: 0,
+        start: null,
+        lastDelivery: null
+      });
+    }
+    const group = groups.get(key);
+    group.rows.push(row);
+    group.volume += 1;
+    group.delivered += Number(row.delivered);
+    group.exceptions += Number(row.exception);
+    group.issueWeight += controllableIssueWeight(row);
+    if (row.pickupAt && (!group.start || row.pickupAt < group.start)) group.start = row.pickupAt;
+    if (row.signedAt && (!group.lastDelivery || row.signedAt > group.lastDelivery)) group.lastDelivery = row.signedAt;
+  });
+  return [...groups.values()].map(group => {
+    const deliveryRate = group.volume ? group.delivered / group.volume : 0;
+    const elapsedHours = group.start && group.lastDelivery
+      ? Math.max((group.lastDelivery - group.start) / 3600000, 0)
+      : 0;
+    return {
+      ...group,
+      deliveryRate,
+      failureRate: 1 - deliveryRate,
+      issueRate: group.volume ? group.exceptions / group.volume : 0,
+      weightedIssueRate: group.volume ? group.issueWeight / group.volume : 0,
+      throughput: elapsedHours > 0 ? group.delivered / elapsedHours : null
+    };
+  }).sort((a, b) => a.date.localeCompare(b.date) || a.driver.localeCompare(b.driver));
+}
+
+function calibrateEwmaAlpha(dayRoutes) {
+  const candidates = [.05, .10, .15, .20, .25];
+  const series = new Map();
+  dayRoutes.forEach(day => {
+    const key = `${day.driver}|||${day.route}`;
+    if (!series.has(key)) series.set(key, []);
+    series.get(key).push(day);
+  });
+  let best = null;
+  candidates.forEach(alpha => {
+    let squaredError = 0;
+    let predictions = 0;
+    series.forEach(days => {
+      days.sort((a, b) => a.date.localeCompare(b.date));
+      if (days.length < 2) return;
+      let estimate = days[0].deliveryRate;
+      for (let index = 1; index < days.length; index += 1) {
+        squaredError += (estimate - days[index].deliveryRate) ** 2;
+        predictions += 1;
+        estimate = (1 - alpha) * estimate + alpha * days[index].deliveryRate;
+      }
+    });
+    const mse = predictions ? squaredError / predictions : Infinity;
+    if (!best || mse < best.mse) best = {alpha, mse, predictions};
+  });
+  if (!best || best.predictions < 20) {
+    return {alpha: .10, mse: best?.mse ?? null, predictions: best?.predictions || 0, calibrated: false};
+  }
+  return {...best, calibrated: true};
+}
+
+function capacityConfidence(days, successfulDays, packages) {
+  if (days >= 10 && successfulDays >= 5 && packages >= 1000) return "高";
+  if (days >= 5 && successfulDays >= 2 && packages >= 300) return "中";
+  return "低";
+}
+
+function summarizeDrivers(rows, dayRoutes, calibration) {
   const groups = new Map();
   rows.forEach(row => {
     const key = `${row.driver}|||${row.area}`;
-    if (!groups.has(key)) groups.set(key, {driver: row.driver, area: row.area, rows: [], days: new Map()});
-    const group = groups.get(key);
-    group.rows.push(row);
-    const day = dateKey(row.routeDate);
-    group.days.set(day, (group.days.get(day) || 0) + 1);
+    if (!groups.has(key)) groups.set(key, {driver: row.driver, area: row.area, rows: []});
+    groups.get(key).rows.push(row);
   });
-  const priorStrength = 50;
   return [...groups.values()].map(group => {
+    const days = dayRoutes
+      .filter(day => day.driver === group.driver && day.route === group.area)
+      .sort((a, b) => a.date.localeCompare(b.date));
     const delivered = group.rows.filter(row => row.delivered).length;
     const eligible = group.rows.filter(row => row.onTimeEligible);
     const onTime = eligible.filter(row => row.onTime).length;
     const exceptions = group.rows.filter(row => row.exception).length;
     const returns = group.rows.filter(row => row.returned).length;
-    const baseline = fleetOnTimeRate ?? fleetDeliveredRate;
-    const adjustedOnTime = (onTime + priorStrength * baseline) / (eligible.length + priorStrength);
+    const successfulVolumes = days.filter(day => day.deliveryRate >= .99).map(day => day.volume);
+    let smoothedRate = days[0]?.deliveryRate ?? 0;
+    days.slice(1).forEach(day => {
+      smoothedRate = (1 - calibration.alpha) * smoothedRate + calibration.alpha * day.deliveryRate;
+    });
+    const capacity99 = successfulVolumes.length ? Math.round(percentile(successfulVolumes, .75)) : 0;
+    const provenCapacity = successfulVolumes.length ? Math.max(...successfulVolumes) : 0;
+    const weightedIssueTotal = group.rows.reduce((sum, row) => sum + controllableIssueWeight(row), 0);
+    const lastDay = days[days.length - 1];
     return {
       driver: group.driver,
       area: group.area,
@@ -340,15 +437,20 @@ function summarizeDrivers(rows) {
       delivered,
       eligible: eligible.length,
       onTime,
-      adjustedOnTime,
+      smoothedRate,
       exceptions,
+      weightedIssueTotal,
       returns,
-      days: group.days.size,
-      p75Capacity: Math.round(percentile([...group.days.values()], .75)),
+      days: days.length,
+      successfulDays: successfulVolumes.length,
+      capacity99,
+      provenCapacity,
+      confidence: capacityConfidence(days.length, successfulVolumes.length, group.rows.length),
+      dailyAlert: Boolean(lastDay && lastDay.deliveryRate < .99),
       totalWeight: group.rows.reduce((sum, row) => sum + row.weightKg, 0),
       zips: new Set(group.rows.map(row => row.zip).filter(Boolean)).size
     };
-  }).sort((a, b) => b.adjustedOnTime - a.adjustedOnTime || b.days - a.days || b.packages - a.packages);
+  }).sort((a, b) => b.capacity99 - a.capacity99 || b.smoothedRate - a.smoothedRate || b.days - a.days);
 }
 
 function summarizeRoutes(rows) {
@@ -393,7 +495,7 @@ function renderMetrics() {
   const onTime = eligible.filter(row => row.onTime).length;
   $("metricRows").textContent = formatInt(rows.length);
   $("metricRowsNote").textContent = `${formatInt(new Set(rows.map(row => row.tracking).filter(Boolean)).size)} 个唯一运单`;
-  $("metricMatch").textContent = formatPct(state.quality.matched, rows.length);
+  $("metricMatch").textContent = formatPct(state.quality.matched, state.quality.monitoringRows);
   $("metricMatchNote").textContent = `${formatInt(state.quality.matched)} 条已连接`;
   $("metricDelivered").textContent = formatPct(delivered, rows.length);
   $("metricDeliveredNote").textContent = `${formatInt(delivered)} 条识别为签收`;
@@ -431,13 +533,22 @@ function renderDriverTable() {
       <td>${escapeHtml(driver.area)}</td>
       <td>${formatInt(driver.packages)}</td>
       <td>${formatPct(driver.delivered, driver.packages)}</td>
-      <td>${formatPct(driver.onTime, driver.eligible)}</td>
-      <td>${(driver.adjustedOnTime * 100).toFixed(1)}%</td>
-      <td>${formatPct(driver.exceptions, driver.packages)}</td>
+      <td>${(driver.smoothedRate * 100).toFixed(1)}%</td>
+      <td>${driver.capacity99 ? formatInt(driver.capacity99) : "—"}</td>
+      <td>${driver.provenCapacity ? formatInt(driver.provenCapacity) : "—"}</td>
       <td>${formatInt(driver.days)}</td>
-      <td>${formatInt(driver.p75Capacity)}</td>
-      <td>${formatWeight(driver.totalWeight)}</td>
+      <td>${escapeHtml(driver.confidence)}</td>
+      <td>${formatPct(driver.weightedIssueTotal, driver.packages)}</td>
+      <td class="${driver.dailyAlert ? "risk-high" : "risk-low"}">${driver.dailyAlert ? "当天低于99%" : "正常"}</td>
     </tr>`).join("");
+}
+
+function renderModelNote() {
+  const calibration = state.calibration;
+  const alphaText = calibration.calibrated
+    ? `EWMA α=${calibration.alpha.toFixed(2)}（walk-forward ${formatInt(calibration.predictions)} 次预测中误差最低）`
+    : `EWMA α=0.10（仅 ${formatInt(calibration.predictions)} 次预测，数据不足，暂用保守默认值）`;
+  $("modelNote").textContent = `${alphaText}。Capacity₉₉ = 妥投率≥99%的司机-日-区域货量P75；Proven Capacity为历史达标最大量。可控问题权重目前是透明的暂定分类，尚未进入Capacity计算。`;
 }
 
 function riskClass(risk) {
@@ -467,26 +578,33 @@ function renderAreaSelect() {
 function recommendDrivers() {
   const area = $("areaSelect").value;
   const planned = Math.max(1, Number($("plannedPackages").value) || 1);
-  const candidates = state.drivers.filter(driver => driver.area === area).map(driver => ({
-    ...driver,
-    capacityFit: driver.p75Capacity >= planned,
-    capacityRatio: driver.p75Capacity ? planned / driver.p75Capacity : Infinity
-  })).sort((a, b) => Number(b.capacityFit) - Number(a.capacityFit) || b.adjustedOnTime - a.adjustedOnTime || b.days - a.days || a.capacityRatio - b.capacityRatio);
+  const riskRank = {低: 0, 中: 1, 高: 2, "数据不足": 3};
+  const candidates = state.drivers.filter(driver => driver.area === area).map(driver => {
+    const loadRatio = driver.capacity99 ? planned / driver.capacity99 : Infinity;
+    let risk = "低";
+    if (!driver.capacity99) risk = "数据不足";
+    else if (loadRatio > 1.05 || driver.smoothedRate < .97) risk = "高";
+    else if (loadRatio > 1 || driver.smoothedRate < .99 || driver.dailyAlert) risk = "中";
+    return {...driver, loadRatio, risk};
+  }).sort((a, b) => riskRank[a.risk] - riskRank[b.risk] || a.loadRatio - b.loadRatio || b.smoothedRate - a.smoothedRate || b.days - a.days);
   if (!candidates.length) {
     $("recommendation").className = "recommendation empty-state";
     $("recommendation").textContent = "该区域尚无历史司机数据。";
     return;
   }
   $("recommendation").className = "recommendation";
-  $("recommendation").innerHTML = candidates.slice(0, 5).map((driver, index) => `
+  $("recommendation").innerHTML = candidates.slice(0, 5).map((driver, index) => {
+    const ratioText = Number.isFinite(driver.loadRatio) ? `${(driver.loadRatio * 100).toFixed(1)}%` : "无法计算";
+    return `
     <div class="recommend-card">
       <span class="rank">${index + 1}</span>
       <div class="recommend-main">
         <strong>${escapeHtml(driver.driver)}</strong>
-        <small>调整后准时率 ${(driver.adjustedOnTime * 100).toFixed(1)}% · ${driver.days}天经验 · P75容量 ${driver.p75Capacity}件</small>
+        <small>Capacity₉₉ ${driver.capacity99 || "—"}件 · Load Ratio ${ratioText} · 熟悉 ${driver.days}天 · 置信度 ${driver.confidence}</small>
       </div>
-      <span class="tag ${driver.capacityFit ? "good" : "warn"}">${driver.capacityFit ? "容量适配" : "可能超载"}</span>
-    </div>`).join("");
+      <span class="tag ${driver.risk === "低" ? "good" : "warn"}">${escapeHtml(driver.risk)}风险</span>
+    </div>`;
+  }).join("");
 }
 
 function initializeMap() {
@@ -554,10 +672,10 @@ function hashValue(value) {
   return hash >>> 0;
 }
 
-function approximateStopPoint(center, key) {
+function approximateStopPoint(center, key, spreadOverride = null) {
   const angle = hashValue(key) / 4294967295 * Math.PI * 2;
   const distanceSeed = hashValue(`${key}|distance`) / 4294967295;
-  const spread = String(key).startsWith("122") ? .016 : .032;
+  const spread = spreadOverride ?? (String(key).startsWith("122") ? .016 : .032);
   const distance = Math.sqrt(distanceSeed) * spread;
   const latitude = center.lat + Math.sin(angle) * distance;
   const longitudeScale = Math.max(.2, Math.cos(center.lat * Math.PI / 180));
@@ -630,7 +748,6 @@ async function locateRoutes(event) {
     return;
   }
   $("locateBtn").disabled = true;
-  const bounds = [];
   let located = 0;
   let outsideRegion = 0;
   const maxPackages = Math.max(...routes.map(route => route.packages), 1);
@@ -652,26 +769,25 @@ async function locateRoutes(event) {
         const radius = 7 + Math.sqrt(route.packages / maxPackages) * 12;
         const cityLabel = [...route.cities].join("、") || point.place || "—";
         const areaLabel = [...route.areas].join("、") || "未识别区域";
-        const marker = L.circleMarker([point.lat, point.lng], {
+        L.circleMarker([point.lat, point.lng], {
           radius,
           color,
           fillColor: color,
           fillOpacity: .48,
           weight: 2
         }).bindTooltip(`${escapeHtml(route.zip)} · ${formatInt(route.packages)}件`, {direction: "top"})
-          .bindPopup(`<strong>${escapeHtml(areaLabel)} · ${escapeHtml(route.zip)}</strong><br>${escapeHtml(cityLabel)}<br>${formatInt(route.packages)} 件 · ${formatWeight(route.totalWeight)}<br>妥投率 ${formatPct(route.delivered, route.packages)}<br>准时率 ${formatPct(route.onTime, route.eligible)}`, {autoPan: false});
-        marker.addTo(state.markerLayer);
+          .bindPopup(`<strong>${escapeHtml(areaLabel)} · ${escapeHtml(route.zip)}</strong><br>${escapeHtml(cityLabel)}<br>${formatInt(route.packages)} 件 · ${formatWeight(route.totalWeight)}<br>妥投率 ${formatPct(route.delivered, route.packages)}<br>准时率 ${formatPct(route.onTime, route.eligible)}`, {autoPan: false})
+          .addTo(state.markerLayer);
       }
-      bounds.push([point.lat, point.lng]);
       located += 1;
     } catch (error) {
       console.warn(error.message);
     }
   }
+
   let plottedStops = 0;
   if (mode === "stops") {
-    const stops = combineApproxStops(state.mergedRows);
-    stops.forEach(stop => {
+    combineApproxStops(state.mergedRows).forEach(stop => {
       const center = zipPoints.get(stop.zip);
       if (!center) return;
       const point = approximateStopPoint(center, stop.key);
@@ -687,14 +803,42 @@ async function locateRoutes(event) {
         fillColor: color,
         fillOpacity: .5
       }).bindTooltip(`${escapeHtml(stop.street)} · ${formatInt(stop.packages)}件`, {direction: "top"})
-        .bindPopup(`<strong>大致Stop · ${escapeHtml(stop.zip)}</strong><br>${escapeHtml(stop.street)}<br>${escapeHtml(stop.city)} · ${escapeHtml(areaLabel)}<br>${formatInt(stop.packages)} 件<br>妥投率 ${formatPct(stop.delivered, stop.packages)}<br>异常 ${formatInt(stop.exceptions)} 件`, {autoPan: false})
+        .bindPopup(`<strong>街道聚合Stop · ${escapeHtml(stop.zip)}</strong><br>${escapeHtml(stop.street)}<br>${escapeHtml(stop.city)} · ${escapeHtml(areaLabel)}<br>${formatInt(stop.packages)} 件<br>妥投率 ${formatPct(stop.delivered, stop.packages)}<br>异常 ${formatInt(stop.exceptions)} 件`, {autoPan: false})
         .addTo(state.markerLayer);
       plottedStops += 1;
     });
   }
-    // Keep the current Albany view stable after markers load; users can pan manually.
+
+  let plottedPackages = 0;
+  if (mode === "packages") {
+    state.mergedRows.forEach(row => {
+      const center = zipPoints.get(row.zip);
+      if (!center) return;
+      const streetKey = `${row.zip}|||${row.streetGroup || "街道信息缺失"}`;
+      const streetPoint = approximateStopPoint(center, streetKey);
+      const point = approximateStopPoint(streetPoint, `${streetKey}|||${row.tracking}`, .0018);
+      const color = row.exception || row.returned || !row.delivered
+        ? "#b33a31"
+        : row.onTimeEligible && row.onTime
+          ? "#0d6b4f"
+          : "#b87018";
+      L.circleMarker([point.lat, point.lng], {
+        renderer: state.canvasRenderer,
+        radius: 2.3,
+        stroke: false,
+        fillColor: color,
+        fillOpacity: .62,
+        interactive: false
+      }).addTo(state.markerLayer);
+      plottedPackages += 1;
+    });
+  }
+
+  // Keep the current Albany view stable after markers load; users can pan manually.
   if (mode === "stops") {
-    $("mapStatus").textContent = `已生成 ${formatInt(plottedStops)} 个街道级大致Stop（非真实门牌）`;
+    $("mapStatus").textContent = `已生成 ${formatInt(plottedStops)} 个街道聚合Stop（非真实门牌）`;
+  } else if (mode === "packages") {
+    $("mapStatus").textContent = `已生成 ${formatInt(plottedPackages)} 个逐包裹模拟点（非真实建筑坐标）`;
   } else {
     $("mapStatus").textContent = outsideRegion
       ? `已定位 ${located}/${routes.length} 个ZIP，忽略 ${outsideRegion} 个范围外ZIP`
@@ -749,11 +893,14 @@ function runAnalysis(monitoringRows, detailRows) {
   state.detailRows = [];
   state.mergedRows = result.merged;
   state.quality = result.quality;
-  state.drivers = summarizeDrivers(result.merged);
+  state.driverDays = buildDriverDayRoutes(result.merged);
+  state.calibration = calibrateEwmaAlpha(state.driverDays);
+  state.drivers = summarizeDrivers(result.merged, state.driverDays, state.calibration);
   state.routes = summarizeRoutes(result.merged);
   renderMetrics();
   renderQuality();
   renderDriverTable();
+  renderModelNote();
   renderRouteTable();
   renderAreaSelect();
   $("results").classList.remove("hidden");
@@ -809,6 +956,8 @@ function resetAll() {
   state.drivers = [];
   state.routes = [];
   state.quality = {};
+  state.calibration = {alpha: .1, calibrated: false, predictions: 0, mse: null};
+  state.driverDays = [];
   state.markerLayer?.clearLayers();
   updateAnalyzeButton();
   setStatus("等待数据");
@@ -829,5 +978,5 @@ $("exportBtn").addEventListener("click", exportCsv);
 updateAnalyzeButton();
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = {cleanRows, parseDate, parseDueTime, normalizeTracking, normalizeZip, repairSheetRange, mergeData, combineMapRoutes, combineApproxStops, approximateStopPoint};
+  module.exports = {cleanRows, parseDate, parseDueTime, normalizeTracking, normalizeZip, repairSheetRange, mergeData, buildDriverDayRoutes, calibrateEwmaAlpha, summarizeDrivers, combineMapRoutes, combineApproxStops, approximateStopPoint};
 }
