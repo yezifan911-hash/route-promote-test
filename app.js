@@ -7,8 +7,8 @@ const MONITORING_KEEP = [
 ];
 
 const DETAIL_KEEP = [
-  "运单号", "袋号", "派送方", "收件州/省", "收件城市", "收件区", "收件地邮编", "预报重量(kg)",
-  "结算重量(kg)", "运单状态", "操作人", "产品类型", "箱号", "收件地详细地址", "预报体积",
+  "运单号", "客户单号", "派送方", "收件州/省", "收件城市", "收件区", "收件地邮编", "预报重量(kg)",
+  "结算重量(kg)", "运单状态", "操作人", "产品类型", "预报体积",
   "预报体积重", "复核重量", "复核体积", "复核体积重", "快递员工作区域名称", "目的中心",
   "目的站点", "下单时间", "是否退件", "派送失败天数", "编辑时间", "首次中心签入时间", "最新操作时间"
 ];
@@ -98,6 +98,30 @@ function parseDate(value, order = "mdy") {
   return Number.isNaN(fallback.getTime()) ? null : fallback;
 }
 
+function parseDueTime(value, referenceDate) {
+  if (!value && value !== 0) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+
+  // GOFO monitoring exports may store the deadline as HHmm text/number,
+  // for example 2400 = midnight at the end of the pickup date.
+  const compactTime = text.replace(/[:：]/g, "");
+  if (/^\d{3,4}$/.test(compactTime) && referenceDate) {
+    const padded = compactTime.padStart(4, "0");
+    const hour = Number(padded.slice(0, 2));
+    const minute = Number(padded.slice(2));
+    if (minute < 60 && (hour < 24 || (hour === 24 && minute === 0))) {
+      const deadline = new Date(referenceDate);
+      deadline.setHours(0, 0, 0, 0);
+      if (hour === 24) deadline.setDate(deadline.getDate() + 1);
+      else deadline.setHours(hour, minute, 0, 0);
+      return deadline;
+    }
+  }
+
+  return parseDate(value, "mdy");
+}
+
 function dateKey(date) {
   if (!date) return "未知日期";
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -170,20 +194,22 @@ function mergeData(monitoringRows, detailRows) {
     const explicitSignedAt = parseDate(source["签收时间"], "mdy");
     const inferredSignedAt = delivered ? parseDate(detail["最新操作时间"], "mdy") : null;
     const signedAt = explicitSignedAt || inferredSignedAt;
-    const dueAt = parseDate(source["妥投时效"], "mdy");
-    const pickupAt = parseDate(pick(source, ["快递员取件时间", "任务领取时间"]), "mdy") || parseDate(source["取件日期"], "dmy");
+    const pickupDate = parseDate(source["取件日期"], "dmy");
+    const pickupAt = parseDate(pick(source, ["快递员取件时间", "任务领取时间"]), "mdy") || pickupDate;
+    const deadlineReference = pickupAt || parseDate(source["中心签出日期"], "dmy") || signedAt;
+    const dueAt = parseDueTime(source["妥投时效"], deadlineReference);
     const driver = String(pick(source, ["快递员名称"]) || pick(detail, ["操作人"]) || "未识别司机").trim();
     const area = String(pick(source, ["快递员区域名称"]) || pick(detail, ["快递员工作区域名称"]) || "未识别区域").trim();
     const zip = normalizeZip(pick(source, ["邮编"]) || pick(detail, ["收件地邮编"]));
     const row = {
       tracking,
+      customerOrder: String(detail["客户单号"] || "").trim(),
       matched: Boolean(detailMap.has(tracking)),
       driver,
       area,
       zip,
       city: String(detail["收件城市"] || "").trim(),
       state: String(detail["收件州/省"] || "").trim(),
-      streetMasked: String(detail["收件地详细地址"] || "").trim(),
       task: String(source["任务编码"] || "").trim(),
       station: String(pick(source, ["签入站点"]) || pick(detail, ["派送方", "目的站点"])).trim(),
       pickupAt,
@@ -198,7 +224,6 @@ function mergeData(monitoringRows, detailRows) {
       problemType: String(source["问题件类型"] || "").trim(),
       weightKg: asNumber(pick(detail, ["结算重量(kg)", "预报重量(kg)", "复核重量"])),
       volumeWeightKg: asNumber(pick(detail, ["预报体积重", "复核体积重"])),
-      bag: String(detail["袋号"] || "").trim(),
       onTimeEligible: Boolean(delivered && signedAt && dueAt),
       onTime: Boolean(delivered && signedAt && dueAt && signedAt <= dueAt),
       routeDate: pickupAt || parseDate(source["中心签出日期"], "dmy") || signedAt
@@ -491,6 +516,7 @@ function exportCsv() {
   if (!state.mergedRows.length || !window.XLSX) return;
   const output = state.mergedRows.map(row => ({
     "运单号": row.tracking,
+    "客户单号": row.customerOrder,
     "司机": row.driver,
     "区域": row.area,
     "ZIP": row.zip,
@@ -522,8 +548,10 @@ function runAnalysis(monitoringRows, detailRows) {
   const detailHeaders = Object.keys(detailRows[0]);
   if (!monitoringHeaders.includes("运单号") || !detailHeaders.includes("运单号")) throw new Error("两份报表都必须包含“运单号”列。");
   const result = mergeData(monitoringRows, detailRows);
-  state.monitoringRows = monitoringRows;
-  state.detailRows = detailRows;
+  // Raw rows can contain personal or commercially sensitive fields. Keep only
+  // the normalized merged records required by the analysis after the join.
+  state.monitoringRows = [];
+  state.detailRows = [];
   state.mergedRows = result.merged;
   state.quality = result.quality;
   state.drivers = summarizeDrivers(result.merged);
@@ -547,7 +575,14 @@ async function handleAnalyze() {
   try {
     const [monitoringRows, detailRows] = await Promise.all([readSpreadsheet(monitoringFile), readSpreadsheet(detailFile)]);
     runAnalysis(monitoringRows, detailRows);
-    setStatus(`分析完成：${formatInt(state.mergedRows.length)} 条记录`, "success");
+    const q = state.quality;
+    if (q.matched === 0) {
+      setStatus(`已读取监控 ${formatInt(q.monitoringRows)} 条、明细 ${formatInt(q.detailRows)} 条，但没有共同运单号。请确认日期和车队范围一致。`, "error");
+    } else if (q.monitoringRows <= 1 || q.detailRows <= 1) {
+      setStatus(`仅检测到监控 ${formatInt(q.monitoringRows)} 条、明细 ${formatInt(q.detailRows)} 条；请确认导出时没有保留单号筛选。`, "warn");
+    } else {
+      setStatus(`分析完成：监控 ${formatInt(q.monitoringRows)} 条，成功连接 ${formatInt(q.matched)} 条`, "success");
+    }
   } catch (error) {
     console.error(error);
     setStatus(error.message || "文件读取失败", "error");
@@ -597,3 +632,7 @@ $("locateBtn").addEventListener("click", locateRoutes);
 $("exportBtn").addEventListener("click", exportCsv);
 
 updateAnalyzeButton();
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {parseDate, parseDueTime, normalizeTracking, normalizeZip, mergeData};
+}
