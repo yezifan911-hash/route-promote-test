@@ -94,7 +94,8 @@
             <label class="map-mode-label">视图
               <select id="mapMode">
                 <option value="zip">ZIP货量</option>
-                <option value="stops">大致Stop</option>
+                <option value="stops">街道聚合Stop</option>
+                <option value="packages">逐包裹近似点</option>
               </select>
             </label>
             <button type="button" id="locateBtn" class="secondary">生成地图</button>
@@ -108,7 +109,7 @@
           <span><i class="legend-dot bad"></i>&lt;97%</span>
           <span>圆圈大小＝件量</span>
         </div>
-        <p class="footnote">大致Stop按打码街道分组，并在ZIP中心周边生成稳定的模拟位置；不代表真实门牌或逐户导航。</p>
+        <p class="footnote">街道Stop按打码街道聚合；逐包裹点是在街道近似位置附近生成的稳定模拟点。门牌号已打码，因此两者都不代表真实建筑、门牌或逐户导航。</p>
       </section>
 
       <section class="two-column">
@@ -126,7 +127,7 @@
           <div class="section-heading compact">
             <div>
               <p class="step">04 · 分配建议</p>
-              <h2 id="recommend-title">司机推荐</h2>
+              <h2 id="recommend-title">司机—线路适配</h2>
             </div>
           </div>
           <div class="form-grid">
@@ -138,7 +139,7 @@
             </label>
           </div>
           <button type="button" id="recommendBtn" class="primary full">生成推荐</button>
-          <div id="recommendation" class="recommendation empty-state">选择区域和计划件量后生成推荐。</div>
+          <div id="recommendation" class="recommendation empty-state">选择区域与固定线路货量，计算Capacity₉₉、Load Ratio和风险。</div>
         </section>
       </section>
 
@@ -146,24 +147,26 @@
         <div class="section-heading compact">
           <div>
             <p class="step">05 · 司机表现</p>
-            <h2 id="driver-title">司机—区域表现</h2>
+            <h2 id="driver-title">司机能力与线路匹配</h2>
           </div>
           <button type="button" id="exportBtn" class="secondary">导出清洗结果 CSV</button>
         </div>
+        <p id="modelNote" class="model-note">等待历史数据校准模型。</p>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>司机</th>
-                <th>区域</th>
-                <th>记录数</th>
+                <th>区域/线路</th>
+                <th>历史件量</th>
                 <th>妥投率</th>
-                <th>准时率</th>
-                <th>调整后准时率</th>
-                <th>异常率</th>
+                <th>EWMA表现</th>
+                <th>Capacity₉₉</th>
+                <th>达标最大量</th>
                 <th>熟悉天数</th>
-                <th>P75日容量</th>
-                <th>总重量</th>
+                <th>置信度</th>
+                <th>加权可控问题率</th>
+                <th>Daily Alert</th>
               </tr>
             </thead>
             <tbody id="driverTableBody"></tbody>
@@ -202,7 +205,7 @@
   </main>
 
   <footer>
-    <p>Prototype v1 · 仅用于历史表现分析与分配模拟，不提供逐户导航。</p>
+    <p>Prototype v2 · 历史能力与线路匹配模拟；近似点不提供逐户导航，建议由主管复核。</p>
   </footer>
 
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
