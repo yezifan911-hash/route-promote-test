@@ -492,10 +492,15 @@ function initializeMap() {
     maxBoundsViscosity: .85,
     worldCopyJump: false
   }).setView([42.72, -73.88], 9);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 18,
+  const tileLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    updateWhenIdle: true,
+    keepBuffer: 4,
     attribution: "&copy; OpenStreetMap contributors"
   }).addTo(state.map);
+  tileLayer.on("tileerror", () => {
+    $("mapStatus").textContent = "部分底图未加载；ZIP点仍可正常查看";
+  });
   state.markerLayer = L.layerGroup().addTo(state.map);
 }
 
