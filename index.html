@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="BEN车队司机与区域妥投表现分析工具">
+  <title>BEN Route Performance Lab</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIINfQ3ynhMZx8H5p7aa0hl1G+U6aQwX0A=" crossorigin="">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">BEN DELIVERY ANALYTICS</p>
+      <h1>司机—线路妥投优化</h1>
+      <p class="subtitle">连接配送监控与运单明细，按司机、区域和ZIP评估历史表现。</p>
+    </div>
+    <div class="privacy-pill" title="原始Excel不会上传到服务器">本地处理</div>
+  </header>
+
+  <main>
+    <section class="panel upload-panel" aria-labelledby="upload-title">
+      <div class="section-heading">
+        <div>
+          <p class="step">01 · 数据导入</p>
+          <h2 id="upload-title">上传两份报表</h2>
+        </div>
+        <p class="section-note">支持 .xlsx、.xls、.csv；以运单号自动连接。</p>
+      </div>
+
+      <div class="upload-grid">
+        <label class="file-card" for="monitoringFile">
+          <span class="file-number">A</span>
+          <span class="file-title">配送监控表</span>
+          <span class="file-help">司机、任务、取件、签收、妥投时效、问题件</span>
+          <input id="monitoringFile" type="file" accept=".xlsx,.xls,.csv">
+          <span id="monitoringName" class="file-name">尚未选择文件</span>
+        </label>
+
+        <label class="file-card" for="detailFile">
+          <span class="file-number">B</span>
+          <span class="file-title">运单明细表</span>
+          <span class="file-help">城市、ZIP、重量、体积、区域、最新操作时间</span>
+          <input id="detailFile" type="file" accept=".xlsx,.xls,.csv">
+          <span id="detailName" class="file-name">尚未选择文件</span>
+        </label>
+      </div>
+
+      <div class="action-row">
+        <button id="analyzeBtn" class="primary" disabled>连接并分析</button>
+        <button id="sampleBtn" class="secondary">加载脱敏示例</button>
+        <button id="resetBtn" class="ghost">重置</button>
+        <span id="statusText" class="status" role="status">等待数据</span>
+      </div>
+
+      <details class="privacy-details">
+        <summary>数据如何处理</summary>
+        <p>Excel仅在当前浏览器内读取。分析仅保留业务所需字段，姓名以外的收件人信息、手机号、邮箱、客户单号等字段不会进入分析结果。ZIP地图查询只发送5位ZIP，不发送街道、运单号或司机信息。</p>
+      </details>
+    </section>
+
+    <section id="results" class="results hidden" aria-live="polite">
+      <section class="metric-grid" aria-label="总体指标">
+        <article class="metric-card">
+          <span class="metric-label">监控记录</span>
+          <strong id="metricRows">—</strong>
+          <small id="metricRowsNote">配送尝试</small>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">连接成功率</span>
+          <strong id="metricMatch">—</strong>
+          <small id="metricMatchNote">按运单号</small>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">妥投率</span>
+          <strong id="metricDelivered">—</strong>
+          <small id="metricDeliveredNote">已签收 / 监控记录</small>
+        </article>
+        <article class="metric-card accent">
+          <span class="metric-label">准时妥投率</span>
+          <strong id="metricOnTime">—</strong>
+          <small id="metricOnTimeNote">仅计算时间完整记录</small>
+        </article>
+      </section>
+
+      <section class="panel map-panel" aria-labelledby="map-title">
+        <div class="section-heading compact">
+          <div>
+            <p class="step">02 · 空间分布</p>
+            <h2 id="map-title">ZIP货量地图</h2>
+          </div>
+          <div class="map-actions">
+            <button id="locateBtn" class="secondary">定位ZIP</button>
+            <span id="mapStatus" class="section-note">圆圈大小代表件量</span>
+          </div>
+        </div>
+        <div id="map" aria-label="Albany区域ZIP地图"></div>
+        <p class="footnote">地图显示ZIP中心点估算，不代表客户实际地址；未向地图服务发送街道或个人信息。</p>
+      </section>
+
+      <section class="two-column">
+        <section class="panel" aria-labelledby="quality-title">
+          <div class="section-heading compact">
+            <div>
+              <p class="step">03 · 数据检查</p>
+              <h2 id="quality-title">数据质量</h2>
+            </div>
+          </div>
+          <div id="qualityList" class="quality-list"></div>
+        </section>
+
+        <section class="panel" aria-labelledby="recommend-title">
+          <div class="section-heading compact">
+            <div>
+              <p class="step">04 · 分配建议</p>
+              <h2 id="recommend-title">司机推荐</h2>
+            </div>
+          </div>
+          <div class="form-grid">
+            <label>区域
+              <select id="areaSelect"></select>
+            </label>
+            <label>计划件量
+              <input id="plannedPackages" type="number" min="1" step="1" value="100">
+            </label>
+          </div>
+          <button id="recommendBtn" class="primary full">生成推荐</button>
+          <div id="recommendation" class="recommendation empty-state">选择区域和计划件量后生成推荐。</div>
+        </section>
+      </section>
+
+      <section class="panel table-panel" aria-labelledby="driver-title">
+        <div class="section-heading compact">
+          <div>
+            <p class="step">05 · 司机表现</p>
+            <h2 id="driver-title">司机—区域表现</h2>
+          </div>
+          <button id="exportBtn" class="secondary">导出清洗结果 CSV</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>司机</th>
+                <th>区域</th>
+                <th>记录数</th>
+                <th>妥投率</th>
+                <th>准时率</th>
+                <th>调整后准时率</th>
+                <th>异常率</th>
+                <th>熟悉天数</th>
+                <th>P75日容量</th>
+                <th>总重量</th>
+              </tr>
+            </thead>
+            <tbody id="driverTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel table-panel" aria-labelledby="route-title">
+        <div class="section-heading compact">
+          <div>
+            <p class="step">06 · 线路画像</p>
+            <h2 id="route-title">区域—ZIP表现</h2>
+          </div>
+          <p class="section-note">动态线路以区域、ZIP和当日货量描述。</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>区域</th>
+                <th>ZIP</th>
+                <th>城市</th>
+                <th>件量</th>
+                <th>司机数</th>
+                <th>妥投率</th>
+                <th>准时率</th>
+                <th>总重量</th>
+                <th>风险提示</th>
+              </tr>
+            </thead>
+            <tbody id="routeTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <footer>
+    <p>Prototype v1 · 仅用于历史表现分析与分配模拟，不提供逐户导航。</p>
+  </footer>
+
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="app.js"></script>
+</body>
+</html>
