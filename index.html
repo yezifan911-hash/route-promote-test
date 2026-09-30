@@ -56,7 +56,7 @@
 
       <details class="privacy-details">
         <summary>数据如何处理</summary>
-        <p>Excel仅在当前浏览器内读取。分析仅保留业务所需字段，手机号、邮箱、收件人姓名、详细地址和申报货值等字段不会进入分析结果。ZIP地图查询只发送5位ZIP，不发送街道、运单号或司机信息。</p>
+        <p>Excel仅在当前浏览器内读取。分析仅保留业务所需字段，手机号、邮箱、收件人姓名和申报货值不会进入分析结果。打码街道仅在浏览器内用于大致Stop分组；地图查询只发送5位ZIP，不发送街道、运单号或司机信息。</p>
       </details>
     </section>
 
@@ -91,12 +91,24 @@
             <h2 id="map-title">ZIP货量地图</h2>
           </div>
           <div class="map-actions">
-            <button type="button" id="locateBtn" class="secondary">定位ZIP</button>
-            <span id="mapStatus" class="section-note">ZIP中心点；圆圈按相对件量缩放</span>
+            <label class="map-mode-label">视图
+              <select id="mapMode">
+                <option value="zip">ZIP货量</option>
+                <option value="stops">大致Stop</option>
+              </select>
+            </label>
+            <button type="button" id="locateBtn" class="secondary">生成地图</button>
+            <span id="mapStatus" class="section-note">选择视图后生成</span>
           </div>
         </div>
-        <div id="map" aria-label="Albany区域ZIP地图"></div>
-        <p class="footnote">地图显示ZIP中心点估算，不代表客户实际地址；未向地图服务发送街道或个人信息。</p>
+        <div id="map" aria-label="Albany区域配送分布地图"></div>
+        <div class="map-legend" aria-label="地图图例">
+          <span><i class="legend-dot good"></i>妥投率 ≥99%</span>
+          <span><i class="legend-dot warn"></i>97%–99%</span>
+          <span><i class="legend-dot bad"></i>&lt;97%</span>
+          <span>圆圈大小＝件量</span>
+        </div>
+        <p class="footnote">大致Stop按打码街道分组，并在ZIP中心周边生成稳定的模拟位置；不代表真实门牌或逐户导航。</p>
       </section>
 
       <section class="two-column">
