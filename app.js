@@ -40,6 +40,9 @@ const state = {
   quality: {},
   calibration: {alpha: .1, calibrated: false, predictions: 0, mse: null},
   driverDays: [],
+  historyCount: 0,
+  historyAdded: 0,
+  historyUpdated: 0,
   map: null,
   markerLayer: null,
   canvasRenderer: null
@@ -49,6 +52,180 @@ const $ = id => document.getElementById(id);
 const formatInt = value => new Intl.NumberFormat("zh-CN", {maximumFractionDigits: 0}).format(value || 0);
 const formatWeight = value => `${new Intl.NumberFormat("zh-CN", {maximumFractionDigits: 1}).format(value || 0)} kg`;
 const formatPct = (num, den) => den ? `${(num / den * 100).toFixed(1)}%` : "—";
+
+const HISTORY_DB_NAME = "ben-route-history-v1";
+const HISTORY_DB_VERSION = 1;
+const HISTORY_STORE_NAME = "deliveries";
+const HISTORY_FIELDS = [
+  "tracking", "customerOrder", "matched", "driver", "area", "zip", "city", "state", "streetGroup",
+  "task", "station", "pickupAt", "signedAt", "dueAt", "signedTimeInferred", "delivered", "returned",
+  "courierStatus", "latestStatus", "detailStatus", "problemType", "weightKg", "volumeWeightKg",
+  "onTimeEligible", "onTime", "routeDate", "exception"
+];
+const HISTORY_DATE_FIELDS = ["pickupAt", "signedAt", "dueAt", "routeDate"];
+
+function toHistoryRow(row) {
+  const stored = {};
+  HISTORY_FIELDS.forEach(field => {
+    if (row[field] !== undefined) stored[field] = row[field];
+  });
+  stored.tracking = normalizeTracking(stored.tracking);
+  return stored;
+}
+
+function hydrateHistoryRow(row) {
+  const hydrated = {...row};
+  HISTORY_DATE_FIELDS.forEach(field => {
+    if (!hydrated[field]) {
+      hydrated[field] = null;
+      return;
+    }
+    if (!(hydrated[field] instanceof Date)) hydrated[field] = new Date(hydrated[field]);
+    if (Number.isNaN(hydrated[field].getTime())) hydrated[field] = null;
+  });
+  return hydrated;
+}
+
+function historyFreshness(row) {
+  return Math.max(0, ...HISTORY_DATE_FIELDS.map(field => {
+    const value = row[field];
+    if (!value) return 0;
+    const date = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+  }));
+}
+
+function openHistoryDb() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) {
+      reject(new Error("当前浏览器不支持本地历史数据库。"));
+      return;
+    }
+    const request = indexedDB.open(HISTORY_DB_NAME, HISTORY_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(HISTORY_STORE_NAME)) {
+        const store = db.createObjectStore(HISTORY_STORE_NAME, {keyPath: "tracking"});
+        store.createIndex("routeDate", "routeDate", {unique: false});
+        store.createIndex("driver", "driver", {unique: false});
+        store.createIndex("area", "area", {unique: false});
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("无法打开本地历史数据库。"));
+  });
+}
+
+async function readHistoryRows() {
+  const db = await openHistoryDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(HISTORY_STORE_NAME, "readonly");
+    const request = transaction.objectStore(HISTORY_STORE_NAME).getAll();
+    request.onsuccess = () => resolve((request.result || []).map(hydrateHistoryRow));
+    request.onerror = () => reject(request.error || new Error("读取本地历史失败。"));
+    transaction.oncomplete = () => db.close();
+    transaction.onerror = () => db.close();
+  });
+}
+
+async function writeHistoryRows(rows) {
+  if (!rows.length) return;
+  const db = await openHistoryDb();
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction(HISTORY_STORE_NAME, "readwrite");
+    const store = transaction.objectStore(HISTORY_STORE_NAME);
+    rows.forEach(row => {
+      const stored = toHistoryRow(row);
+      if (stored.tracking) store.put(stored);
+    });
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("保存本地历史失败。"));
+    transaction.onabort = () => reject(transaction.error || new Error("保存本地历史被中断。"));
+  });
+  db.close();
+}
+
+async function clearHistoryRows() {
+  const db = await openHistoryDb();
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction(HISTORY_STORE_NAME, "readwrite");
+    transaction.objectStore(HISTORY_STORE_NAME).clear();
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("清空本地历史失败。"));
+  });
+  db.close();
+}
+
+async function mergeIntoHistory(incomingRows) {
+  const existingRows = await readHistoryRows();
+  const map = new Map(existingRows.map(row => [normalizeTracking(row.tracking), row]));
+  const changedRows = [];
+  let added = 0;
+  let updated = 0;
+  incomingRows.forEach(rawRow => {
+    const row = hydrateHistoryRow(toHistoryRow(rawRow));
+    const key = row.tracking;
+    if (!key) return;
+    const previous = map.get(key);
+    if (!previous) {
+      map.set(key, row);
+      changedRows.push(row);
+      added += 1;
+      return;
+    }
+    // Prefer the newly uploaded row when it is at least as recent. This lets
+    // corrected delivery status replace an earlier version without duplicating the package.
+    if (historyFreshness(row) >= historyFreshness(previous)) {
+      map.set(key, row);
+      changedRows.push(row);
+      updated += 1;
+    }
+  });
+  await writeHistoryRows(changedRows);
+  return {rows: [...map.values()], added, updated, previousCount: existingRows.length};
+}
+
+function historyQuality(count) {
+  return {
+    monitoringRows: count,
+    detailRows: count,
+    matched: count,
+    unmatched: 0,
+    duplicateDetailRows: 0,
+    missingDriver: 0,
+    missingZip: 0,
+    missingArea: 0,
+    missingSignedTime: 0,
+    missingDueTime: 0,
+    contradictory: 0,
+    ignoredMonitoringColumns: 0,
+    ignoredDetailColumns: 0,
+    historyOnly: true
+  };
+}
+
+function setHistoryStatus(message, type = "") {
+  const element = $("historyStatus");
+  if (!element) return;
+  element.textContent = message;
+  element.className = `history-status ${type}`.trim();
+}
+
+async function refreshHistoryStatus() {
+  try {
+    const rows = await readHistoryRows();
+    state.historyCount = rows.length;
+    setHistoryStatus(rows.length
+      ? `本机已保存 ${formatInt(rows.length)} 个唯一运单`
+      : "本机尚无历史数据", rows.length ? "success" : "");
+    $("loadHistoryBtn").disabled = rows.length === 0;
+    $("clearHistoryBtn").disabled = rows.length === 0;
+  } catch (error) {
+    setHistoryStatus(error.message || "本地历史不可用", "error");
+    $("loadHistoryBtn").disabled = true;
+    $("clearHistoryBtn").disabled = true;
+  }
+}
 
 function cleanHeader(value) {
   return String(value ?? "").replace(/\s+/g, "").replace("寄件州\\省", "寄件州/省").trim();
@@ -511,7 +688,8 @@ function qualityClass(value, goodWhenZero = true) {
 function renderQuality() {
   const q = state.quality;
   const items = [
-    ["配送监控记录", formatInt(q.monitoringRows), "good"],
+    ["本地历史库", `${formatInt(state.historyCount)} 个唯一运单`, state.historyCount ? "good" : ""],
+    ["本次配送监控记录", formatInt(q.monitoringRows), "good"],
     ["运单明细记录", formatInt(q.detailRows), "good"],
     ["未匹配运单", formatInt(q.unmatched), qualityClass(q.unmatched)],
     ["明细重复记录", formatInt(q.duplicateDetailRows), qualityClass(q.duplicateDetailRows)],
@@ -881,22 +1059,15 @@ function exportCsv() {
   URL.revokeObjectURL(url);
 }
 
-function runAnalysis(monitoringRows, detailRows) {
-  if (!monitoringRows.length || !detailRows.length) throw new Error("两份报表都必须包含至少一行数据。");
-  const monitoringHeaders = Object.keys(monitoringRows[0]);
-  const detailHeaders = Object.keys(detailRows[0]);
-  if (!monitoringHeaders.includes("运单号") || !detailHeaders.includes("运单号")) throw new Error("两份报表都必须包含“运单号”列。");
-  const result = mergeData(monitoringRows, detailRows);
-  // Raw rows can contain personal or commercially sensitive fields. Keep only
-  // the normalized merged records required by the analysis after the join.
+function applyAnalysisRows(rows, quality) {
   state.monitoringRows = [];
   state.detailRows = [];
-  state.mergedRows = result.merged;
-  state.quality = result.quality;
-  state.driverDays = buildDriverDayRoutes(result.merged);
+  state.mergedRows = rows;
+  state.quality = quality;
+  state.driverDays = buildDriverDayRoutes(rows);
   state.calibration = calibrateEwmaAlpha(state.driverDays);
-  state.drivers = summarizeDrivers(result.merged, state.driverDays, state.calibration);
-  state.routes = summarizeRoutes(result.merged);
+  state.drivers = summarizeDrivers(rows, state.driverDays, state.calibration);
+  state.routes = summarizeRoutes(rows);
   renderMetrics();
   renderQuality();
   renderDriverTable();
@@ -908,6 +1079,76 @@ function runAnalysis(monitoringRows, detailRows) {
   setTimeout(() => state.map?.invalidateSize({pan: false, animate: false}), 0);
 }
 
+async function runAnalysis(monitoringRows, detailRows, options = {}) {
+  const {persist = false} = options;
+  if (!monitoringRows.length || !detailRows.length) throw new Error("两份报表都必须包含至少一行数据。");
+  const monitoringHeaders = Object.keys(monitoringRows[0]);
+  const detailHeaders = Object.keys(detailRows[0]);
+  if (!monitoringHeaders.includes("运单号") || !detailHeaders.includes("运单号")) throw new Error("两份报表都必须包含“运单号”列。");
+  const result = mergeData(monitoringRows, detailRows);
+  let analysisRows = result.merged;
+  let historyInfo = null;
+
+  if (persist && result.merged.length) {
+    try {
+      historyInfo = await mergeIntoHistory(result.merged);
+      analysisRows = historyInfo.rows;
+      state.historyCount = analysisRows.length;
+      state.historyAdded = historyInfo.added;
+      state.historyUpdated = historyInfo.updated;
+      setHistoryStatus(`本机已保存 ${formatInt(analysisRows.length)} 个唯一运单`, "success");
+      $("loadHistoryBtn").disabled = false;
+      $("clearHistoryBtn").disabled = false;
+    } catch (error) {
+      console.error(error);
+      setHistoryStatus(`${error.message || "历史保存失败"}；本次仍可分析`, "error");
+    }
+  } else {
+    state.historyAdded = 0;
+    state.historyUpdated = 0;
+  }
+
+  applyAnalysisRows(analysisRows, result.quality);
+  return {result, historyInfo};
+}
+
+async function loadHistoryAnalysis() {
+  setStatus("正在读取本机历史…");
+  try {
+    const rows = await readHistoryRows();
+    if (!rows.length) {
+      setStatus("本机尚无历史数据。", "warn");
+      await refreshHistoryStatus();
+      return;
+    }
+    state.historyCount = rows.length;
+    state.historyAdded = 0;
+    state.historyUpdated = 0;
+    applyAnalysisRows(rows, historyQuality(rows.length));
+    setStatus(`已加载 ${formatInt(rows.length)} 个历史唯一运单`, "success");
+    setHistoryStatus(`本机已保存 ${formatInt(rows.length)} 个唯一运单`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "读取本地历史失败", "error");
+  }
+}
+
+async function handleClearHistory() {
+  if (!window.confirm("确定清空当前浏览器保存的全部历史记录吗？此操作无法撤销。")) return;
+  try {
+    await clearHistoryRows();
+    state.historyCount = 0;
+    state.historyAdded = 0;
+    state.historyUpdated = 0;
+    resetAll();
+    await refreshHistoryStatus();
+    setStatus("本地历史已清空", "success");
+  } catch (error) {
+    console.error(error);
+    setHistoryStatus(error.message || "清空历史失败", "error");
+  }
+}
+
 async function handleAnalyze() {
   const monitoringFile = $("monitoringFile").files[0];
   const detailFile = $("detailFile").files[0];
@@ -916,14 +1157,18 @@ async function handleAnalyze() {
   $("analyzeBtn").disabled = true;
   try {
     const [monitoringRows, detailRows] = await Promise.all([readSpreadsheet(monitoringFile), readSpreadsheet(detailFile)]);
-    runAnalysis(monitoringRows, detailRows);
+    const accumulate = $("accumulateHistory").checked;
+    const {historyInfo} = await runAnalysis(monitoringRows, detailRows, {persist: accumulate});
     const q = state.quality;
     if (q.matched === 0) {
       setStatus(`已读取监控 ${formatInt(q.monitoringRows)} 条、明细 ${formatInt(q.detailRows)} 条，但没有共同运单号。请确认日期和车队范围一致。`, "error");
     } else if (q.monitoringRows <= 1 || q.detailRows <= 1) {
       setStatus(`仅检测到监控 ${formatInt(q.monitoringRows)} 条、明细 ${formatInt(q.detailRows)} 条；请确认导出时没有保留单号筛选。`, "warn");
     } else {
-      setStatus(`分析完成：监控 ${formatInt(q.monitoringRows)} 条，成功连接 ${formatInt(q.matched)} 条`, "success");
+      const historyText = historyInfo
+        ? `；历史库新增 ${formatInt(historyInfo.added)} 条、更新 ${formatInt(historyInfo.updated)} 条，当前共 ${formatInt(state.historyCount)} 条`
+        : "";
+      setStatus(`分析完成：监控 ${formatInt(q.monitoringRows)} 条，成功连接 ${formatInt(q.matched)} 条${historyText}`, "success");
     }
   } catch (error) {
     console.error(error);
@@ -966,17 +1211,20 @@ function resetAll() {
 $("monitoringFile").addEventListener("change", updateAnalyzeButton);
 $("detailFile").addEventListener("change", updateAnalyzeButton);
 $("analyzeBtn").addEventListener("click", handleAnalyze);
-$("sampleBtn").addEventListener("click", () => {
-  runAnalysis(cleanRows(SAMPLE_MONITORING), cleanRows(SAMPLE_DETAIL));
-  setStatus("已加载6条脱敏示例", "success");
+$("sampleBtn").addEventListener("click", async () => {
+  await runAnalysis(cleanRows(SAMPLE_MONITORING), cleanRows(SAMPLE_DETAIL), {persist: false});
+  setStatus("已加载6条脱敏示例；示例不会写入历史库", "success");
 });
 $("resetBtn").addEventListener("click", resetAll);
+$("loadHistoryBtn").addEventListener("click", loadHistoryAnalysis);
+$("clearHistoryBtn").addEventListener("click", handleClearHistory);
 $("recommendBtn").addEventListener("click", recommendDrivers);
 $("locateBtn").addEventListener("click", locateRoutes);
 $("exportBtn").addEventListener("click", exportCsv);
 
 updateAnalyzeButton();
+refreshHistoryStatus();
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = {cleanRows, parseDate, parseDueTime, normalizeTracking, normalizeZip, repairSheetRange, mergeData, buildDriverDayRoutes, calibrateEwmaAlpha, summarizeDrivers, combineMapRoutes, combineApproxStops, approximateStopPoint};
+  module.exports = {cleanRows, parseDate, parseDueTime, normalizeTracking, normalizeZip, repairSheetRange, mergeData, buildDriverDayRoutes, calibrateEwmaAlpha, summarizeDrivers, combineMapRoutes, combineApproxStops, approximateStopPoint, toHistoryRow, hydrateHistoryRow, historyFreshness};
 }
