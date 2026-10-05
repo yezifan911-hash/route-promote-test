@@ -50,22 +50,34 @@
       <div class="action-row">
         <button type="button" id="analyzeBtn" class="primary" disabled>连接并分析</button>
         <button type="button" id="sampleBtn" class="secondary">加载脱敏示例</button>
-        <button type="button" id="resetBtn" class="ghost">重置</button>
+        <button type="button" id="resetBtn" class="ghost">重置画面</button>
         <span id="statusText" class="status" role="status">等待数据</span>
+      </div>
+
+      <div class="history-panel">
+        <label class="history-toggle">
+          <input id="accumulateHistory" type="checkbox" checked>
+          <span>每次分析自动叠加到本机历史</span>
+        </label>
+        <span id="historyStatus" class="history-status" role="status">正在读取本机历史…</span>
+        <div class="history-actions">
+          <button type="button" id="loadHistoryBtn" class="secondary" disabled>仅加载历史分析</button>
+          <button type="button" id="clearHistoryBtn" class="ghost danger" disabled>清空本地历史</button>
+        </div>
       </div>
 
       <details class="privacy-details">
         <summary>数据如何处理</summary>
-        <p>Excel仅在当前浏览器内读取。分析仅保留业务所需字段，手机号、邮箱、收件人姓名和申报货值不会进入分析结果。打码街道仅在浏览器内用于大致Stop分组；地图查询只发送5位ZIP，不发送街道、运单号或司机信息。</p>
+        <p>Excel仅在当前浏览器内读取。开启自动叠加后，清洗结果保存在当前设备、当前浏览器的 IndexedDB 中，不会上传到 GitHub。系统按运单号去重，同一运单以后上传的较新状态会覆盖旧状态。手机号、邮箱、收件人姓名和申报货值不会进入历史库；打码街道仅用于大致Stop分组。清理浏览器网站数据或使用无痕模式可能导致历史丢失。</p>
       </details>
     </section>
 
     <section id="results" class="results hidden" aria-live="polite">
       <section class="metric-grid" aria-label="总体指标">
         <article class="metric-card">
-          <span class="metric-label">监控记录</span>
+          <span class="metric-label">分析记录</span>
           <strong id="metricRows">—</strong>
-          <small id="metricRowsNote">配送尝试</small>
+          <small id="metricRowsNote">历史库中的唯一运单</small>
         </article>
         <article class="metric-card">
           <span class="metric-label">连接成功率</span>
